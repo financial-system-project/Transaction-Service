@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-transaction-config
+  namespace: bank-app
+data:
+  POSTGRES_DB: transactiondb
+  POSTGRES_USER: admin
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-transaction-secret
+  namespace: bank-app
+type: Opaque
+stringData:
+  POSTGRES_USER: admin
+  POSTGRES_PASSWORD: secret123
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-transaction
+  namespace: bank-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-transaction
+  template:
+    metadata:
+      labels:
+        app: postgres-transaction
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - configMapRef:
+                name: postgres-transaction-config
+            - secretRef:
+                name: postgres-transaction-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-transaction
+  namespace: bank-app
+spec:
+  selector:
+    app: postgres-transaction
+  ports:
+    - port: 5432
+      targetPort: 5432
