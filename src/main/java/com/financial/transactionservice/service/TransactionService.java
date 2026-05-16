@@ -25,39 +25,62 @@ public class TransactionService {
 
     @Transactional
     public TransferResponse transfer(TransferRequest request) {
-        log.info("Initiating transfer: from={}, to={}, amount={}",
-                request.getFromAccountId(), request.getToAccountId(), request.getAmount());
+        log.info("Initiating transfer: from={}, to={}, amount={}, category={}",
+                request.getFromAccountId(), request.getToAccountId(),
+                request.getAmount(), request.getCategory());
 
-        // Create transaction record
+        // FIX: Fetch source account first to get userId before saving the transaction
+        AccountResponse fromAccount;
+        try {
+            fromAccount = accountServiceClient.getAccount(request.getFromAccountId());
+        } catch (Exception e) {
+            log.error("Could not fetch source account {}", request.getFromAccountId(), e);
+            Transaction failed = Transaction.builder()
+                    .fromAccountId(request.getFromAccountId())
+                    .toAccountId(request.getToAccountId())
+                    .amount(request.getAmount())
+                    .category(request.getCategory() != null ? request.getCategory() : "TRANSFER")
+                    .status("FAILED")
+                    .failureReason("Source account not found: " + e.getMessage())
+                    .build();
+            failed = transactionRepository.save(failed);
+            return TransferResponse.builder()
+                    .transactionId(failed.getId())
+                    .status("FAILED")
+                    .message("Transfer failed: Source account not found")
+                    .timestamp(LocalDateTime.now())
+                    .build();
+        }
+
+        // Create transaction record with userId + category so Budget-Service can query it
         Transaction transaction = Transaction.builder()
                 .fromAccountId(request.getFromAccountId())
                 .toAccountId(request.getToAccountId())
+                // FIX: Store the owner's userId for Budget-Service queries
+                .userId(fromAccount.getUserId())
+                // FIX: Store category (defaults to "TRANSFER" if not sent)
+                .category(request.getCategory() != null ? request.getCategory() : "TRANSFER")
                 .amount(request.getAmount())
                 .status("PENDING")
                 .build();
         transaction = transactionRepository.save(transaction);
 
         try {
-            // Step 1: Validate accounts exist
-            AccountResponse fromAccount = accountServiceClient.getAccount(request.getFromAccountId());
-            AccountResponse toAccount = accountServiceClient.getAccount(request.getToAccountId());
-
             if (fromAccount.getBalance().compareTo(request.getAmount()) < 0) {
                 throw new RuntimeException("Insufficient balance in source account");
             }
 
-            // Step 2: Debit from source account
+            // Step 1: Debit source account
             log.info("Debiting account {}", request.getFromAccountId());
             accountServiceClient.debit(request.getFromAccountId(),
                     Map.of("amount", request.getAmount()));
 
             try {
-                // Step 3: Credit to destination account
+                // Step 2: Credit destination account
                 log.info("Crediting account {}", request.getToAccountId());
                 accountServiceClient.credit(request.getToAccountId(),
                         Map.of("amount", request.getAmount()));
 
-                // Success - mark transaction completed
                 transaction.setStatus("COMPLETED");
                 transaction.setCompletedAt(LocalDateTime.now());
                 transactionRepository.save(transaction);
@@ -70,8 +93,8 @@ public class TransactionService {
                         .build();
 
             } catch (Exception e) {
-                // Credit failed - Compensate: credit back to source account
-                log.error("Credit failed, compensating by crediting back to source account", e);
+                // Credit failed — compensate by crediting back to source
+                log.error("Credit failed, compensating debit", e);
                 accountServiceClient.credit(request.getFromAccountId(),
                         Map.of("amount", request.getAmount()));
 
@@ -88,8 +111,7 @@ public class TransactionService {
             }
 
         } catch (Exception e) {
-            // Debit or validation failed - no compensation needed
-            log.error("Transfer failed at debit stage", e);
+            log.error("Transfer failed", e);
             transaction.setStatus("FAILED");
             transaction.setFailureReason(e.getMessage());
             transactionRepository.save(transaction);
